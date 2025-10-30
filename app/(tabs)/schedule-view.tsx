@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Alert, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View, RefreshControl } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../hooks/useAuth';
 
@@ -56,6 +57,7 @@ export default function ScheduleViewScreen() {
     return fmtDate(new Date());
   });
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [flaggedDates, setFlaggedDates] = useState<Set<string>>(new Set());
   const [attendStatusByDate, setAttendStatusByDate] = useState<Record<string, { attended: boolean; verified: boolean }>>({});
   const [details, setDetails] = useState<{ is_flag_day: boolean; attendance_start: string | null; on_time_end: string | null; attendance_end: string | null; venue?: string | null; description?: string | null } | null>(null);
@@ -65,95 +67,143 @@ export default function ScheduleViewScreen() {
   const monthLabel = useMemo(() => monthAnchor.toLocaleDateString(undefined, { year: 'numeric', month: 'long' }), [monthAnchor]);
   const todayStr = useMemo(() => fmtDate(new Date()), []);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
-        const start = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth(), 1);
-        const end = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + 1, 0);
-        const startStr = fmtDate(start);
-        const endStr = fmtDate(end);
-        const { data, error } = await supabase
-          .from('attendance_schedules')
-          .select('date, is_flag_day')
-          .gte('date', startStr)
-          .lte('date', endStr);
-        if (error) throw error;
-        const flagged = (data || []).filter((row: any) => !!row.is_flag_day).map((row: any) => row.date as string);
-        console.log('[ScheduleView] Flagged dates:', flagged);
-        const reqSet = new Set<string>();
-        if (flagged.length > 0) {
-          if (profile?.role === 'student') {
-            const { program, year, section, id: uid } = (profile as any) || {};
-            console.log('[ScheduleView] Student profile:', { uid, program, year, section });
-            const norm = (v: any) => String(v ?? '').trim().toLowerCase();
-            // Required sections
-            const { data: reqSecs } = await supabase
-              .from('attendance_schedule_required_sections')
-              .select('date, program_code, year_name, section_name')
-              .in('date', flagged);
-            // Explicit required students
-            const { data: reqStud } = await supabase
+  const loadMonthData = useCallback(async () => {
+    try {
+      const start = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth(), 1);
+      const end = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + 1, 0);
+      const startStr = fmtDate(start);
+      const endStr = fmtDate(end);
+      const { data, error } = await supabase
+        .from('attendance_schedules')
+        .select('date, is_flag_day')
+        .gte('date', startStr)
+        .lte('date', endStr);
+      if (error) throw error;
+      const flagged = (data || []).filter((row: any) => !!row.is_flag_day).map((row: any) => row.date as string);
+      console.log('[ScheduleView] Flagged dates:', flagged);
+      const reqSet = new Set<string>();
+      if (flagged.length > 0) {
+        if (profile?.role === 'student') {
+          const { id: uid } = (profile as any) || {};
+          if (!uid) {
+            console.warn('[ScheduleView] No student ID, not highlighting any dates');
+          } else {
+            // Simple: just check if this student's ID is in the required_students table
+            const { data: reqStud, error: studError } = await supabase
               .from('attendance_schedule_required_students')
               .select('date')
               .eq('student_id', uid)
               .in('date', flagged);
-            const reqStudDates = new Set<string>((reqStud || []).map((r: any) => r.date as string));
-            const reqSecDates = new Set<string>();
-            (reqSecs || []).forEach((r: any) => {
-              if (norm(r.program_code) === norm(program) && norm(r.year_name) === norm(year) && norm(r.section_name) === norm(section)) {
-                reqSecDates.add(r.date as string);
-              }
+            
+            if (studError) {
+              console.error('[ScheduleView] Error fetching required students:', studError);
+            }
+            
+            console.log('[ScheduleView] Required dates for student:', {
+              studentId: uid,
+              requiredDates: reqStud || []
             });
-            flagged.forEach(d => { if (reqStudDates.has(d) || reqSecDates.has(d)) reqSet.add(d); });
-            console.log('[ScheduleView] Required dates:', { reqSecDates: Array.from(reqSecDates), reqStudDates: Array.from(reqStudDates), finalReqSet: Array.from(reqSet) });
-          } else if (profile?.role === 'teacher') {
-            const { id: uid } = (profile as any) || {};
-            const { data: reqTeach } = await supabase
-              .from('attendance_schedule_required_teachers')
-              .select('date')
-              .eq('teacher_id', uid)
-              .in('date', flagged);
-            (reqTeach || []).forEach((r: any) => reqSet.add(r.date as string));
-          } else {
-            // Other roles: show all flagged
-            flagged.forEach(d => reqSet.add(d));
+            
+            // Add dates where this student is required
+            (reqStud || []).forEach((r: any) => reqSet.add(r.date as string));
           }
-        }
-        console.log('[ScheduleView] Setting flagged dates:', Array.from(reqSet));
-        setFlaggedDates(reqSet);
-
-        // Also load my attendance within the month to color cells by status
-        if (profile?.id) {
-          const startISO = new Date(start); startISO.setHours(0,0,0,0);
-          const endISO = new Date(end); endISO.setHours(23,59,59,999);
-          const { data: recs, error: rErr } = await supabase
-            .from('attendance_records')
-            .select('created_at, verified')
-            .eq('user_id', profile.id)
-            .gte('created_at', startISO.toISOString())
-            .lte('created_at', endISO.toISOString());
-          if (rErr) throw rErr;
-          const map: Record<string, { attended: boolean; verified: boolean }> = {};
-          (recs || []).forEach((r: any) => {
-            const d = new Date(r.created_at);
-            const ds = fmtDate(d);
-            if (!map[ds]) map[ds] = { attended: true, verified: !!r.verified };
-            else map[ds].verified = map[ds].verified || !!r.verified;
-          });
-          setAttendStatusByDate(map);
+        } else if (profile?.role === 'teacher') {
+          const { id: uid } = (profile as any) || {};
+          const { data: reqTeach } = await supabase
+            .from('attendance_schedule_required_teachers')
+            .select('date')
+            .eq('teacher_id', uid)
+            .in('date', flagged);
+          (reqTeach || []).forEach((r: any) => reqSet.add(r.date as string));
         } else {
-          setAttendStatusByDate({});
+          // Other roles: show all flagged
+          flagged.forEach(d => reqSet.add(d));
         }
-      } catch (e) {
-        console.warn('[ScheduleView] month load failed', e);
-        setFlaggedDates(new Set());
+      }
+      console.log('[ScheduleView] Setting flagged dates:', Array.from(reqSet));
+      setFlaggedDates(reqSet);
+
+      // Also load my attendance within the month to color cells by status
+      if (profile?.id) {
+        const startISO = new Date(start); startISO.setHours(0,0,0,0);
+        const endISO = new Date(end); endISO.setHours(23,59,59,999);
+        const { data: recs, error: rErr } = await supabase
+          .from('attendance_records')
+          .select('created_at, verified')
+          .eq('user_id', profile.id)
+          .gte('created_at', startISO.toISOString())
+          .lte('created_at', endISO.toISOString());
+        if (rErr) throw rErr;
+        const map: Record<string, { attended: boolean; verified: boolean }> = {};
+        (recs || []).forEach((r: any) => {
+          const d = new Date(r.created_at);
+          const ds = fmtDate(d);
+          if (!map[ds]) map[ds] = { attended: true, verified: !!r.verified };
+          else map[ds].verified = map[ds].verified || !!r.verified;
+        });
+        setAttendStatusByDate(map);
+      } else {
         setAttendStatusByDate({});
+      }
+    } catch (e) {
+      console.warn('[ScheduleView] month load failed', e);
+      setFlaggedDates(new Set());
+      setAttendStatusByDate({});
+    }
+  }, [monthAnchor, profile?.id, profile?.role]);
+
+  // Load data when component mounts
+  useEffect(() => {
+    (async () => {
+      try {
+        setLoading(true);
+        await loadMonthData();
       } finally {
         setLoading(false);
       }
     })();
-  }, [monthAnchor, profile?.id, profile?.role]);
+  }, [loadMonthData]);
+
+  // Also reload data when screen comes into focus
+  // This ensures students see updated required attendees status immediately
+  useFocusEffect(
+    useCallback(() => {
+      loadMonthData();
+    }, [loadMonthData])
+  );
+
+  const onRefresh = useCallback(async () => {
+    try {
+      setRefreshing(true);
+      await loadMonthData();
+      // Reload details for selected date
+      const { data, error } = await supabase
+        .from('attendance_schedules')
+        .select('is_flag_day, attendance_start, on_time_end, attendance_end, venue, description')
+        .eq('date', selectedDate)
+        .maybeSingle();
+      if (!error) setDetails(data as any);
+      // Reload attendance for selected date
+      if (profile?.id) {
+        const start = new Date(selectedDate + 'T00:00:00');
+        const end = new Date(selectedDate + 'T23:59:59.999');
+        const { data: recData } = await supabase
+          .from('attendance_records')
+          .select('id, created_at, verified, verified_at')
+          .eq('user_id', profile.id)
+          .gte('created_at', start.toISOString())
+          .lte('created_at', end.toISOString())
+          .order('created_at', { ascending: false })
+          .limit(1);
+        const rec = (recData && recData.length > 0) ? recData[0] as any : null;
+        setMyAttendance(rec ? { id: rec.id, created_at: rec.created_at, verified: !!rec.verified, verified_at: rec.verified_at } : null);
+      }
+    } catch (e) {
+      console.error('[ScheduleView] refresh failed', e);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadMonthData, selectedDate, profile?.id]);
 
   useEffect(() => {
     (async () => {
@@ -197,7 +247,17 @@ export default function ScheduleViewScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={{ padding: 16 }}>
+      <ScrollView 
+        contentContainerStyle={{ padding: 16 }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            colors={['#4e73df']}
+            tintColor="#4e73df"
+          />
+        }
+      >
         <Text style={styles.title}>Attendance Schedule</Text>
         <Text style={styles.subtitle}>These dates are configured by admins. Tap a highlighted date to view details.</Text>
 

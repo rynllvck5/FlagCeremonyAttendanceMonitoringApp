@@ -60,8 +60,6 @@ const SettingItem = ({
 
 export default function SettingsScreen() {
   const { profile, signOut, refreshProfile } = useAuth();
-  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
-  const [darkMode, setDarkMode] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [showChangePw, setShowChangePw] = useState(false);
   const [newPassword, setNewPassword] = useState('');
@@ -231,33 +229,6 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView style={styles.container} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}>
-      <Text style={styles.sectionTitle}>Preferences</Text>
-      <View style={styles.section}>
-        <SettingItem
-          title="Push Notifications"
-          description="Receive push notifications for important updates"
-          type="switch"
-          value={notificationsEnabled}
-          onValueChange={(val) => {
-            if (val) {
-              Alert.alert('Coming Soon!', 'Push notifications feature is coming soon!');
-            }
-            setNotificationsEnabled(val);
-          }}
-        />
-        <SettingItem
-          title="Dark Mode"
-          description="Enable dark theme"
-          type="switch"
-          value={darkMode}
-          onValueChange={(val) => {
-            if (val) {
-              Alert.alert('Coming Soon!', 'Dark mode feature is coming soon!');
-            }
-            setDarkMode(val);
-          }}
-        />
-      </View>
 
       {isAdmin && (
         <>

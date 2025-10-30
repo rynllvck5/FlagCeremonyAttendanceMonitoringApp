@@ -1,15 +1,19 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Image } from 'react-native';
 import { Alert, StyleSheet, Text, TouchableOpacity, View, ScrollView, RefreshControl } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../hooks/useAuth';
+import { useUnreadNotifications } from '../../hooks/useUnreadNotifications';
 import { supabase, SUPABASE_URL } from '../../lib/supabase';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 
 export default function ProfileScreen() {
   const router = useRouter();
   const { profile, signOut, refreshProfile } = useAuth();
+  const { unreadCount, refetch: refetchUnreadCount } = useUnreadNotifications();
   const [refreshing, setRefreshing] = useState(false);
   const [profilePicUploading, setProfilePicUploading] = useState(false);
   const [profilePicturePath, setProfilePicturePath] = useState<string | null>(null);
@@ -17,6 +21,12 @@ export default function ProfileScreen() {
   useEffect(() => {
     setProfilePicturePath(profile?.profile_picture ?? null);
   }, [profile?.profile_picture]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refetchUnreadCount();
+    }, [refetchUnreadCount])
+  );
 
 
   // No inline personal info editing on this screen
@@ -109,7 +119,7 @@ export default function ProfileScreen() {
   if (!profile) {
     return (
       <View style={styles.container}>
-        <Text>Loading...</Text>
+        <Text style={{ color: '#212529' }}>Loading...</Text>
       </View>
     );
   }
@@ -124,6 +134,7 @@ export default function ProfileScreen() {
     try {
       setRefreshing(true);
       await refreshProfile();
+      await refetchUnreadCount();
     } finally {
       setRefreshing(false);
     }
@@ -131,59 +142,82 @@ export default function ProfileScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} /> }>
-      <View style={styles.header}>
+      {/* Header Card */}
+      <View style={[styles.headerCard, { backgroundColor: '#fff', borderColor: '#e9ecef' }]}> 
+        <View style={{ alignItems: 'center' }}>
+          <TouchableOpacity 
+            onPress={handlePickProfilePicture} 
+            disabled={profilePicUploading}
+            hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Change profile picture"
+          >
+            {profilePicturePath ? (
+              <Image
+                source={{ uri: `${supabase.storage.from('profile-pictures').getPublicUrl(profilePicturePath).data.publicUrl}?t=${Date.now()}` }}
+                style={styles.avatarImg}
+              />
+            ) : (
+              <View style={[styles.avatar, { backgroundColor: '#007AFF' }] }>
+                <Text style={styles.avatarText}>
+                  {profile.first_name?.charAt(0)}{profile.last_name?.charAt(0)}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
+          <Text style={[styles.name, { color: '#212529' }]}>{displayName}</Text>
+          <Text style={[styles.emailValue, { color: '#6c757d' }]}>{profile.email}</Text>
+          <View style={[styles.rolePill, { backgroundColor: '#e9ecef' }]}> 
+            <Text style={{ color: '#6c757d', textTransform: 'capitalize', fontWeight: '700' }}>{profile.role}</Text>
+          </View>
+        </View>
+        <View style={{ flexDirection: 'row', gap: 12, marginTop: 16 }}>
+          <TouchableOpacity 
+            style={[styles.primaryBtn, { backgroundColor: '#007AFF' }]}
+            onPress={() => router.push('/(tabs)/edit-profile')}
+          >
+            <Ionicons name="create-outline" size={18} color="#fff" />
+            <Text style={styles.primaryBtnText}>Edit Profile</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.secondaryBtn, { borderColor: '#e9ecef' }]}
+            onPress={() => router.push('/(tabs)/settings')}
+          >
+            <Ionicons name="settings-outline" size={18} color={'#212529'} />
+            <Text style={[styles.secondaryBtnText, { color: '#212529' }]}>Settings</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Quick Links */}
+      <View style={[styles.listCard, { backgroundColor: '#fff', borderColor: '#e9ecef' }]}> 
         <TouchableOpacity 
-          onPress={handlePickProfilePicture} 
-          onPressIn={() => console.log('[Profile] Avatar onPressIn')}
-          disabled={profilePicUploading}
-          hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
-          activeOpacity={0.7}
-          accessibilityRole="button"
-          accessibilityLabel="Change profile picture"
+          style={styles.listItem}
+          onPress={() => router.push('/(tabs)/notifications')}
         >
-          {profilePicturePath ? (
-            <Image
-              source={{ uri: `${supabase.storage.from('profile-pictures').getPublicUrl(profilePicturePath).data.publicUrl}?t=${Date.now()}` }}
-              style={styles.avatarImg}
-            />
-          ) : (
-            <View style={styles.avatar}>
-              <Text style={styles.avatarText}>
-                {profile.first_name?.charAt(0)}{profile.last_name?.charAt(0)}
-              </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Ionicons name="notifications-outline" size={20} color={'#212529'} style={{ marginRight: 10 }} />
+            <Text style={[styles.listItemText, { color: '#212529' }]}>Notifications</Text>
+          </View>
+          {unreadCount > 0 ? (
+            <View style={[styles.unreadBadge, { backgroundColor: '#e03131' }]}>
+              <Text style={[styles.unreadBadgeText, { color: '#fff' }]}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
             </View>
+          ) : (
+            <Ionicons name="chevron-forward" size={18} color={'#6c757d'} />
           )}
         </TouchableOpacity>
-        <Text style={styles.name}>{displayName}</Text>
-        <Text style={[styles.value, styles.email]}>{profile.email}</Text>
-        <Text style={styles.role}>{profile.role}</Text>
       </View>
 
-      
-
-      <View style={[styles.card, { marginTop: 16 }]}> 
-        <Text style={styles.sectionTitle}>Profile</Text>
+      {/* Account */}
+      <View style={[styles.listCard, { backgroundColor: '#fff', borderColor: '#e9ecef' }]}> 
         <TouchableOpacity 
-          style={[styles.button, { marginTop: 12 }]}
-          onPress={() => router.push('/(tabs)/edit-profile')}
-        >
-          <Text style={styles.buttonText}>Edit Profile</Text>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.button, { marginTop: 12 }]}
-          onPress={() => router.push('/(tabs)/settings')}
-        >
-          <Text style={styles.buttonText}>Settings</Text>
-        </TouchableOpacity>
-      </View>
-
-      <View style={[styles.card, { marginTop: 16 }]}>
-        <Text style={styles.sectionTitle}>Account</Text>
-        <TouchableOpacity 
-          style={[styles.button, { backgroundColor: '#f8d7da', marginTop: 12 }]}
+          style={[styles.signOutBtn, { backgroundColor: '#ef3b3b20', borderColor: '#ef3b3b40' }]} 
           onPress={handleSignOut}
         >
-          <Text style={[styles.buttonText, { color: '#721c24' }]}>Sign Out</Text>
+          <Ionicons name="log-out-outline" size={18} color="#e03131" />
+          <Text style={[styles.signOutText]}>Sign Out</Text>
         </TouchableOpacity>
       </View>
     </ScrollView>
@@ -210,13 +244,14 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     padding: 16,
     backgroundColor: '#f8f9fa',
+    justifyContent: 'center',
   },
-  header: {
-    alignItems: 'center',
-    padding: 24,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
+  headerCard: {
+    margin: 16,
+    marginTop: 20,
+    padding: 20,
+    borderRadius: 16,
+    borderWidth: 1,
   },
   avatar: {
     width: 100,
@@ -251,12 +286,12 @@ const styles = StyleSheet.create({
     color: '#6c757d',
     textTransform: 'capitalize',
   },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 20,
-    margin: 16,
-    marginBottom: 0,
+  listCard: {
+    borderRadius: 16,
+    borderWidth: 1,
+    marginHorizontal: 16,
+    marginTop: 12,
+    overflow: 'hidden',
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -265,8 +300,10 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
+    fontSize: 16,
+    fontWeight: '700',
+    marginHorizontal: 20,
+    marginBottom: 6,
   },
   editButton: {
     color: '#007AFF',
@@ -309,10 +346,16 @@ const styles = StyleSheet.create({
     fontSize: 16,
     backgroundColor: '#f8f9fa',
   },
-  value: {
-    fontSize: 16,
-    color: '#212529',
+  emailValue: {
+    fontSize: 14,
     paddingTop: 4,
+  },
+  rolePill: {
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    alignSelf: 'center',
   },
   email: {
     color: '#6c757d',
@@ -330,17 +373,67 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textTransform: 'capitalize',
   },
-  button: {
-    backgroundColor: '#f8f9fa',
-    padding: 16,
-    borderRadius: 8,
+  primaryBtn: {
+    flex: 1,
+    flexDirection: 'row',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#e9ecef',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 10,
   },
-  buttonText: {
+  primaryBtnText: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+  secondaryBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  secondaryBtnText: {
+    fontWeight: '700',
+  },
+  listItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  listItemText: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#212529',
+  },
+  unreadBadge: {
+    borderRadius: 12,
+    minWidth: 24,
+    height: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+  },
+  unreadBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  signOutBtn: {
+    margin: 12,
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  signOutText: {
+    color: '#e03131',
+    fontWeight: '800',
   },
 });

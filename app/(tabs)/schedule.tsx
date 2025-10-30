@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, Switch, Modal } from 'react-native';
+import { ActivityIndicator, Alert, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, Switch, Modal, RefreshControl } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';
@@ -37,6 +37,105 @@ function useMonthMatrix(anchor: Date) {
   }, [anchor]);
 }
 
+// Helper to send notifications for attendance schedule changes
+async function sendAttendanceNotifications(params: {
+  date: string;
+  addedTeachers: string[];
+  removedTeachers: string[];
+  addedStudents: string[];
+  removedStudents: string[];
+  metadata: {
+    venue?: string;
+    attendance_start?: string;
+    on_time_end?: string;
+    attendance_end?: string;
+    description?: string;
+  };
+}) {
+  try {
+    const { date, addedTeachers, removedTeachers, addedStudents, removedStudents, metadata } = params;
+    
+    const formatDate = (dateStr: string) => {
+      const d = new Date(dateStr);
+      return d.toLocaleDateString(undefined, { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      });
+    };
+
+    const notifications: Array<{
+      user_id: string;
+      title: string;
+      message: string;
+      type: 'attendance_required' | 'attendance_not_required';
+      schedule_date: string;
+      metadata: any;
+    }> = [];
+
+    // Notify added teachers
+    addedTeachers.forEach(teacherId => {
+      notifications.push({
+        user_id: teacherId,
+        title: 'Attendance Required',
+        message: `You are required to take attendance on ${formatDate(date)}!`,
+        type: 'attendance_required',
+        schedule_date: date,
+        metadata
+      });
+    });
+
+    // Notify removed teachers
+    removedTeachers.forEach(teacherId => {
+      notifications.push({
+        user_id: teacherId,
+        title: 'Attendance Not Required',
+        message: `You are not required to take attendance on ${formatDate(date)}.`,
+        type: 'attendance_not_required',
+        schedule_date: date,
+        metadata
+      });
+    });
+
+    // Notify added students
+    addedStudents.forEach(studentId => {
+      notifications.push({
+        user_id: studentId,
+        title: 'Attendance Required',
+        message: `You are required to take attendance on ${formatDate(date)}!`,
+        type: 'attendance_required',
+        schedule_date: date,
+        metadata
+      });
+    });
+
+    // Notify removed students
+    removedStudents.forEach(studentId => {
+      notifications.push({
+        user_id: studentId,
+        title: 'Attendance Not Required',
+        message: `You are not required to take attendance on ${formatDate(date)}.`,
+        type: 'attendance_not_required',
+        schedule_date: date,
+        metadata
+      });
+    });
+
+    // Insert all notifications
+    if (notifications.length > 0) {
+      const { error } = await supabase.from('notifications').insert(notifications);
+      if (error) {
+        console.error('[Schedule] Failed to send notifications:', error);
+      } else {
+        console.log('[Schedule] Sent', notifications.length, 'in-app notifications');
+      }
+    }
+  } catch (e) {
+    console.error('[Schedule] Error sending notifications:', e);
+  }
+}
+
 export default function ScheduleScreen() {
   const { profile } = useAuth();
   const isAdmin = ['admin', 'superadmin'].includes(profile?.role || '');
@@ -49,6 +148,7 @@ export default function ScheduleScreen() {
   const [selectedDate, setSelectedDate] = useState<string>(() => fmtDate(new Date()));
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   // schedule fields
   const [isFlagDay, setIsFlagDay] = useState(false);
@@ -131,13 +231,7 @@ export default function ScheduleScreen() {
         setCollegeCode(data.college_code || (profile?.role === 'admin' ? ((profile as any).college || '') : ((profile as any).college || '')) || '');
         setRequireTeachers(!!data.require_teachers);
 
-        // Load required sections for this date
-        const { data: reqs } = await supabase
-          .from('attendance_schedule_required_sections')
-          .select('program_code, year_name, section_name')
-          .eq('date', dateStr);
-        setSelectedReqs((reqs || []) as any);
-        // Load required teachers for this date (ignore if table not present)
+        // Load required teachers for this date
         try {
           const { data: rteach } = await supabase
             .from('attendance_schedule_required_teachers')
@@ -172,8 +266,6 @@ export default function ScheduleScreen() {
           try {
             const { data: tmpl } = await supabase.from('flag_templates').select('require_teachers').eq('college_code', defaultCollege).maybeSingle();
             setRequireTeachers(!!tmpl?.require_teachers);
-            const { data: tsec } = await supabase.from('flag_template_sections').select('program_code, year_name, section_name').eq('college_code', defaultCollege);
-            setSelectedReqs((tsec || []) as any);
             // Load template teachers/students if available
             try {
               const { data: tteach } = await supabase.from('flag_template_teachers').select('teacher_id').eq('college_code', defaultCollege);
@@ -194,33 +286,49 @@ export default function ScheduleScreen() {
     }
   }, []);
 
+  const loadFlaggedDates = useCallback(async () => {
+    try {
+      const start = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth(), 1);
+      const end = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + 1, 0);
+      const startStr = fmtDate(start);
+      const endStr = fmtDate(end);
+      const { data, error } = await supabase
+        .from('attendance_schedules')
+        .select('date, is_flag_day')
+        .gte('date', startStr)
+        .lte('date', endStr);
+      if (error) throw error;
+      const set = new Set<string>();
+      (data || []).forEach((row: any) => { if (row.is_flag_day) set.add(row.date); });
+      setFlaggedDates(set);
+    } catch (e) {
+      console.warn('[Schedule] month highlight load failed', e);
+      setFlaggedDates(new Set());
+    }
+  }, [monthAnchor]);
+
+  const onRefresh = useCallback(async () => {
+    try {
+      setRefreshing(true);
+      // Reload current date schedule
+      await loadSchedule(selectedDate);
+      // Reload flagged dates for calendar highlighting
+      await loadFlaggedDates();
+    } catch (e) {
+      console.error('[Schedule] refresh failed', e);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [selectedDate, loadSchedule, loadFlaggedDates]);
+
   useEffect(() => {
     loadSchedule(selectedDate);
   }, [selectedDate, loadSchedule]);
 
   // Load all schedule days for the current month to highlight
   useEffect(() => {
-    (async () => {
-      try {
-        const start = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth(), 1);
-        const end = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + 1, 0);
-        const startStr = fmtDate(start);
-        const endStr = fmtDate(end);
-        const { data, error } = await supabase
-          .from('attendance_schedules')
-          .select('date, is_flag_day')
-          .gte('date', startStr)
-          .lte('date', endStr);
-        if (error) throw error;
-        const set = new Set<string>();
-        (data || []).forEach((row: any) => { if (row.is_flag_day) set.add(row.date); });
-        setFlaggedDates(set);
-      } catch (e) {
-        console.warn('[Schedule] month highlight load failed', e);
-        setFlaggedDates(new Set());
-      }
-    })();
-  }, [monthAnchor]);
+    loadFlaggedDates();
+  }, [loadFlaggedDates]);
 
   // Load option lists
   useEffect(() => {
@@ -314,6 +422,7 @@ export default function ScheduleScreen() {
   const yearKey = (p: string, y: string) => `${p}__${y}`;
 
   const setSectionToggle = (p: string, y: string, s: string, on: boolean) => {
+    console.log('[Schedule] setSectionToggle:', { program: p, year: y, section: s, on });
     const ids = (students || []).filter(st => st.program === p && st.year === y && st.section === s).map(st => st.id);
     setSelectedStudentIds(prev => {
       const set = new Set(prev);
@@ -322,8 +431,18 @@ export default function ScheduleScreen() {
     });
     setSelectedReqs(prev => {
       const exists = prev.some(r => r.program_code === p && r.year_name === y && r.section_name === s);
-      if (on && !exists) return [...prev, { program_code: p, year_name: y, section_name: s } as any];
-      if (!on && exists) return prev.filter(r => !(r.program_code === p && r.year_name === y && r.section_name === s));
+      console.log('[Schedule] Section exists in selectedReqs:', exists, 'Adding:', on);
+      if (on && !exists) {
+        const newReqs = [...prev, { program_code: p, year_name: y, section_name: s } as any];
+        console.log('[Schedule] Adding section, new count:', newReqs.length);
+        return newReqs;
+      }
+      if (!on && exists) {
+        const newReqs = prev.filter(r => !(r.program_code === p && r.year_name === y && r.section_name === s));
+        console.log('[Schedule] Removing section, new count:', newReqs.length);
+        return newReqs;
+      }
+      console.log('[Schedule] No change to sections');
       return prev;
     });
   };
@@ -399,53 +518,117 @@ export default function ScheduleScreen() {
 
   const confirmFlagDayToggleOff = async () => {
     try {
+      console.log('[Schedule] Deleting schedule for date:', selectedDate);
+      
       // Delete all attendance records for this date if any exist
       if (hasAttendanceRecords) {
-        await supabase
+        console.log('[Schedule] Deleting attendance records...');
+        const { error: recError } = await supabase
           .from('attendance_records')
           .delete()
           .gte('created_at', `${selectedDate}T00:00:00`)
           .lte('created_at', `${selectedDate}T23:59:59`);
+        
+        if (recError) {
+          console.error('[Schedule] Error deleting records:', recError);
+          throw recError;
+        }
+        console.log('[Schedule] Attendance records deleted');
       }
       
-      setIsFlagDay(false);
+      // Manually delete required attendees first (in case cascade isn't set up)
+      console.log('[Schedule] Deleting required teachers...');
+      const { error: teachError } = await supabase
+        .from('attendance_schedule_required_teachers')
+        .delete()
+        .eq('date', selectedDate);
+      if (teachError) console.warn('[Schedule] Error deleting teachers:', teachError);
+      
+      console.log('[Schedule] Deleting required students...');
+      const { error: studError } = await supabase
+        .from('attendance_schedule_required_students')
+        .delete()
+        .eq('date', selectedDate);
+      if (studError) console.warn('[Schedule] Error deleting students:', studError);
+      
+      console.log('[Schedule] Deleting notifications...');
+      const { error: notifError } = await supabase
+        .from('notifications')
+        .delete()
+        .eq('schedule_date', selectedDate);
+      if (notifError) console.warn('[Schedule] Error deleting notifications:', notifError);
+      
+      // Delete the entire attendance_schedules record for this date
+      console.log('[Schedule] Updating attendance schedule to NOT a flag day...');
+      const { error: deleteError } = await supabase
+        .from('attendance_schedules')
+        .update({
+          is_flag_day: false,
+          attendance_start: null,
+          on_time_end: null,
+          attendance_end: null,
+          venue: null,
+          description: null,
+          college_code: null,
+          require_teachers: false,
+        })
+        .eq('date', selectedDate);
+      
+      if (deleteError) {
+        console.error('[Schedule] Error deleting schedule:', deleteError);
+        throw deleteError;
+      }
+      
+      console.log('[Schedule] All deletions successful');
+      
+      // Close the modal first
       setShowFlagWarningModal(false);
       setPendingFlagToggle(false);
+      
+      // Clear all state immediately
+      setIsFlagDay(false);
       setHasAttendanceRecords(false);
+      setSelectedReqs([]);
+      setSelectedTeacherIds([]);
+      setSelectedStudentIds([]);
+      setVenue('');
+      setDescription('');
+      setAttendanceStart('07:00');
+      setOnTimeEnd('07:30');
+      setAttendanceEnd('09:00');
+      setRequireTeachers(false);
       
-      // Reload calendar highlights to reflect the change
-      try {
-        const start = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth(), 1);
-        const end = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + 1, 0);
-        const startStr = fmtDate(start);
-        const endStr = fmtDate(end);
-        const { data, error } = await supabase
-          .from('attendance_schedules')
-          .select('date, is_flag_day')
-          .gte('date', startStr)
-          .lte('date', endStr);
-        if (!error) {
-          const set = new Set<string>();
-          (data || []).forEach((row: any) => { if (row.is_flag_day) set.add(row.date); });
-          setFlaggedDates(set);
-        }
-      } catch (e) {
-        console.warn('[Schedule] Failed to reload calendar highlights', e);
-      }
+      // Reload calendar highlights and schedule data to reflect the change
+      await loadFlaggedDates();
+      await loadSchedule(selectedDate);
       
+      // Show success message after a brief delay to allow UI to update
       const message = hasAttendanceRecords 
-        ? 'Flag ceremony day turned off and attendance records deleted.'
-        : 'Flag ceremony day turned off for this date.';
-      Alert.alert('Success', message);
+        ? 'Flag ceremony day removed and all attendance records deleted.'
+        : 'Flag ceremony day removed for this date.';
+      
+      setTimeout(() => {
+        Alert.alert('Success', message);
+      }, 100);
     } catch (e: any) {
       console.error('[Schedule] Failed to toggle off flag day', e);
-      Alert.alert('Error', e?.message || 'Failed to toggle off flag ceremony day.');
+      Alert.alert('Error', e?.message || 'Failed to remove flag ceremony day.');
     }
   };
 
   const onSave = async () => {
     try {
       if (!isAdmin) return;
+      
+      console.log('[Schedule] onSave called with state:', {
+        selectedDate,
+        isFlagDay,
+        selectedReqs: selectedReqs.length,
+        selectedReqsData: selectedReqs,
+        selectedTeacherIds: selectedTeacherIds.length,
+        selectedStudentIds: selectedStudentIds.length
+      });
+      
       if (!validateTime(attendanceStart) || !validateTime(onTimeEnd) || !validateTime(attendanceEnd)) {
         Alert.alert('Invalid time', 'Please enter time in HH:MM (24-hour) format.');
         return;
@@ -474,37 +657,76 @@ export default function ScheduleScreen() {
         });
       if (error) throw error;
 
-      // Upsert required sections for this date
+      // Update required attendees for this date
+      // We only use student IDs and teacher IDs (no more sections table)
+      // When sections are toggled in UI, setSectionToggle already adds/removes student IDs
       if (isFlagDay) {
-        // Clear existing and insert current selections
-        await supabase.from('attendance_schedule_required_sections').delete().eq('date', selectedDate);
-        if (selectedReqs.length > 0) {
-          const rows = selectedReqs.map(r => ({ date: selectedDate, ...r }));
-          await supabase.from('attendance_schedule_required_sections').insert(rows);
+        console.log('[Schedule] Saving required attendees:', {
+          date: selectedDate,
+          teachers: selectedTeacherIds.length,
+          students: selectedStudentIds.length
+        });
+        
+        // Fetch previous required attendees for notification comparison
+        const { data: prevTeachers } = await supabase
+          .from('attendance_schedule_required_teachers')
+          .select('teacher_id')
+          .eq('date', selectedDate);
+        const { data: prevStudents } = await supabase
+          .from('attendance_schedule_required_students')
+          .select('student_id')
+          .eq('date', selectedDate);
+        
+        const prevTeacherIds = new Set((prevTeachers || []).map((t: any) => t.teacher_id));
+        const prevStudentIds = new Set((prevStudents || []).map((s: any) => s.student_id));
+        const newTeacherIds = new Set(selectedTeacherIds);
+        const newStudentIds = new Set(selectedStudentIds);
+        
+        // Calculate added and removed
+        const addedTeachers = selectedTeacherIds.filter(id => !prevTeacherIds.has(id));
+        const removedTeachers = Array.from(prevTeacherIds).filter(id => !newTeacherIds.has(id));
+        const addedStudents = selectedStudentIds.filter(id => !prevStudentIds.has(id));
+        const removedStudents = Array.from(prevStudentIds).filter(id => !newStudentIds.has(id));
+        
+        // Clear and update required teachers
+        await supabase.from('attendance_schedule_required_teachers').delete().eq('date', selectedDate);
+        if (selectedTeacherIds.length > 0) {
+          const trows = selectedTeacherIds.map(id => ({ date: selectedDate, teacher_id: id }));
+          await supabase.from('attendance_schedule_required_teachers').insert(trows);
+          console.log('[Schedule] Saved', selectedTeacherIds.length, 'required teachers');
+        } else {
+          console.log('[Schedule] No teachers required');
         }
-        // Required teachers
-        try {
-          await supabase.from('attendance_schedule_required_teachers').delete().eq('date', selectedDate);
-          if (selectedTeacherIds.length > 0) {
-            const trows = selectedTeacherIds.map(id => ({ date: selectedDate, teacher_id: id }));
-            await supabase.from('attendance_schedule_required_teachers').insert(trows);
+        
+        // Clear and update required students
+        await supabase.from('attendance_schedule_required_students').delete().eq('date', selectedDate);
+        if (selectedStudentIds.length > 0) {
+          const srows = selectedStudentIds.map(id => ({ date: selectedDate, student_id: id }));
+          await supabase.from('attendance_schedule_required_students').insert(srows);
+          console.log('[Schedule] Saved', selectedStudentIds.length, 'required students');
+        } else {
+          console.log('[Schedule] No students required');
+        }
+        
+        // Send notifications for changes
+        await sendAttendanceNotifications({
+          date: selectedDate,
+          addedTeachers,
+          removedTeachers,
+          addedStudents,
+          removedStudents,
+          metadata: {
+            venue: venue.trim(),
+            attendance_start: attendanceStart,
+            on_time_end: onTimeEnd,
+            attendance_end: attendanceEnd,
+            description: description.trim() || undefined
           }
-        } catch {}
-        // Required students
-        try {
-          await supabase.from('attendance_schedule_required_students').delete().eq('date', selectedDate);
-          if (selectedStudentIds.length > 0) {
-            const srows = selectedStudentIds.map(id => ({ date: selectedDate, student_id: id }));
-            await supabase.from('attendance_schedule_required_students').insert(srows);
-          }
-        } catch {}
-        // Save template for this college
+        });
+        
+        // Save template for this college (for next time)
+        // Templates also use IDs only, no sections table
         await supabase.from('flag_templates').upsert({ college_code: collegeCode, require_teachers: selectedTeacherIds.length > 0, updated_at: new Date().toISOString() });
-        await supabase.from('flag_template_sections').delete().eq('college_code', collegeCode);
-        if (selectedReqs.length > 0) {
-          const trows = selectedReqs.map(r => ({ college_code: collegeCode, ...r }));
-          await supabase.from('flag_template_sections').insert(trows);
-        }
         try {
           await supabase.from('flag_template_teachers').delete().eq('college_code', collegeCode);
           if (selectedTeacherIds.length > 0) {
@@ -539,7 +761,17 @@ export default function ScheduleScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={{ padding: 16 }}>
+      <ScrollView 
+        contentContainerStyle={{ padding: 16 }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            colors={['#4e73df']}
+            tintColor="#4e73df"
+          />
+        }
+      >
         <Text style={styles.title}>Attendance Schedule</Text>
         <Text style={styles.subtitle}>Choose a date and set attendance windows. Students will be marked On Time or Late based on these settings. Absent applies when no attendance is taken for the day.</Text>
 

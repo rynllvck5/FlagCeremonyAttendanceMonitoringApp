@@ -1,15 +1,27 @@
 import { Tabs } from 'expo-router';
 import { useAuth } from '../../hooks/useAuth';
+import { useUnreadNotifications } from '../../hooks/useUnreadNotifications';
 import { ProtectedRoute } from '../../components/ProtectedRoute';
 import { Ionicons } from '@expo/vector-icons';
-import { View, StyleSheet } from 'react-native';
+import { View, StyleSheet, Text } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import { useCallback } from 'react';
 
 export default function TabLayout() {
   const { profile } = useAuth();
+  const { unreadCount, refetch } = useUnreadNotifications();
+
+  // Ensure badge updates when tab bar regains focus
+  useFocusEffect(
+    useCallback(() => {
+      refetch();
+    }, [refetch])
+  );
 
   return (
     <ProtectedRoute allowedRoles={['student', 'teacher', 'admin', 'superadmin']}>
       <Tabs
+        key={`tabs-${unreadCount}`}
         screenOptions={{
           tabBarActiveTintColor: '#007AFF',
           tabBarInactiveTintColor: '#8e8e93',
@@ -83,6 +95,14 @@ export default function TabLayout() {
                   size={24} 
                   color={color} 
                 />
+                {/* Notification Badge */}
+                {unreadCount > 0 && (
+                  <View style={styles.profileBadge}>
+                    <Text style={styles.profileBadgeText}>
+                      {unreadCount > 9 ? '9+' : unreadCount}
+                    </Text>
+                  </View>
+                )}
               </View>
             ),
           }}
@@ -116,6 +136,9 @@ export default function TabLayout() {
         {/** Hidden route for Student/Teacher read-only schedule view */}
         <Tabs.Screen name="schedule-view" options={{ href: null }} />
 
+        {/** Hidden route for Notifications screen */}
+        <Tabs.Screen name="notifications" options={{ href: null }} />
+
         {/** Hide unused/legacy tabs */}
         <Tabs.Screen name="attendance" options={{ href: null }} />
         <Tabs.Screen name="users" options={{ href: null }} />
@@ -130,5 +153,24 @@ const styles = StyleSheet.create({
   tabIconContainer: {
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  profileBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -10,
+    backgroundColor: '#e03131',
+    borderRadius: 10,
+    minWidth: 18,
+    height: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  profileBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
   },
 });

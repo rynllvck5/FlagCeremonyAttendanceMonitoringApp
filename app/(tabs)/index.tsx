@@ -5,6 +5,7 @@ import { ActivityIndicator, Alert, RefreshControl, ScrollView, StyleSheet, Text,
 import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';
 import { useFocusEffect } from '@react-navigation/native';
+import { useUnreadNotifications } from '../../hooks/useUnreadNotifications';
 import AcademicStructuresManager from '../../components/admin/AcademicStructuresManager';
 import AdminManagement from '../../components/admin/AdminManagement';
 import AttendanceReport from '../../components/admin/AttendanceReport';
@@ -14,6 +15,7 @@ type Advisory = { program_code: string; year_name: string; section_name: string 
 export default function HomeScreen() {
   const { profile } = useAuth();
   const router = useRouter();
+  const { unreadCount, refetch: refetchUnreadCount } = useUnreadNotifications();
   const isAdmin = ['admin', 'superadmin'].includes(profile?.role || '');
   const isTeacher = (profile?.role === 'teacher');
   
@@ -124,38 +126,18 @@ export default function HomeScreen() {
             return;
           }
 
-          // Required sections and explicit required students for today
-          const { data: reqs } = await supabase
-            .from('attendance_schedule_required_sections')
-            .select('program_code, year_name, section_name')
-            .eq('date', todayISODate);
+          // Today's requirements - simple: just get IDs
           const { data: reqStud } = await supabase
             .from('attendance_schedule_required_students')
             .select('student_id')
             .eq('date', todayISODate);
-          // Required teachers for today
           const { data: reqTeach } = await supabase
             .from('attendance_schedule_required_teachers')
             .select('teacher_id')
             .eq('date', todayISODate);
 
-          // Determine targeted students = union(section-matched students, explicitly required students)
-          let targetStudentIds: string[] = [];
-          const explicitIds = new Set<string>((reqStud || []).map(r => (r as any).student_id));
-          const reqList = (reqs || []) as any[];
-          if (reqList.length > 0) {
-            const programCodes = Array.from(new Set(reqList.map(r => r.program_code)));
-            const { data: studs } = await supabase
-              .from('user_profiles')
-              .select('id, role, program, year, section')
-              .eq('role', 'student')
-              .in('program', programCodes);
-            const filtered = (studs || []).filter(s => reqList.some(r => r.program_code === s.program && r.year_name === s.year && r.section_name === s.section));
-            filtered.forEach(s => explicitIds.add(s.id));
-          }
-          targetStudentIds = Array.from(explicitIds);
-
-          // Build teacher IDs
+          // Build student and teacher ID lists
+          const targetStudentIds = Array.from(new Set((reqStud || []).map(r => (r as any).student_id)));
           const teacherIds = Array.from(new Set((reqTeach || []).map((t: any) => String(t.teacher_id))));
 
           const total = targetStudentIds.length + teacherIds.length;
@@ -203,21 +185,16 @@ export default function HomeScreen() {
             .eq('date', todayISODate)
             .maybeSingle();
 
-          // Check if this student is targeted today
+          // Check if this student is targeted today - simple ID check
           let isTargeted = false;
           if (schedule?.is_flag_day) {
-            const { data: reqSecs } = await supabase
-              .from('attendance_schedule_required_sections')
-              .select('program_code, year_name, section_name')
-              .eq('date', todayISODate);
             const { data: reqStud } = await supabase
               .from('attendance_schedule_required_students')
               .select('student_id')
               .eq('date', todayISODate)
-              .eq('student_id', profile.id);
-            const norm = (v: any) => String(v ?? '').trim().toLowerCase();
-            const secOk = (reqSecs || []).some((r: any) => norm(r.program_code) === norm((profile as any).program) && norm(r.year_name) === norm((profile as any).year) && norm(r.section_name) === norm((profile as any).section));
-            isTargeted = secOk || ((reqStud || []).length > 0);
+              .eq('student_id', profile.id)
+              .limit(1);
+            isTargeted = (reqStud || []).length > 0;
           }
 
           if (schedule?.is_flag_day && schedule.attendance_end && isTargeted) {
@@ -249,51 +226,54 @@ export default function HomeScreen() {
         }
 
         // Compute dynamic present/absent over the last 60 days
-        console.log('[Home] Computing student stats for:', { id: profile.id, program: (profile as any).program, year: (profile as any).year, section: (profile as any).section });
-        try {
-          const rangeDays = 60;
-          const now = new Date();
-          const start = new Date(now);
-          start.setDate(start.getDate() - rangeDays);
-          const toStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-          const startStr = toStr(start);
-          const endStr = toStr(now);
+        console.log('[Home] Computing student stats for:', { id: profile.id });
+        
+        if (!profile.id) {
+          console.warn('[Home] No student ID, cannot compute attendance stats');
+          setPresentDays([]); setAbsentDays([]); setPresentCount(0); setAbsentCount(0);
+        } else {
+          try {
+            const rangeDays = 60;
+            const now = new Date();
+            const start = new Date(now);
+            start.setDate(start.getDate() - rangeDays);
+            const toStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+            const startStr = toStr(start);
+            const endStr = toStr(now);
 
-          // Fetch schedules in range
-          const { data: scheds, error: sErr } = await supabase
-            .from('attendance_schedules')
-            .select('date, is_flag_day, attendance_end')
-            .gte('date', startStr)
-            .lte('date', endStr);
-          if (sErr) throw sErr;
-          const flagged = (scheds || []).filter((s: any) => !!s.is_flag_day).map((s: any) => s.date as string);
-          console.log('[Home] Flagged dates in range:', flagged);
-          const flagSet = new Set<string>();
-          const schedMap = new Map<string, { attendance_end: string | null; is_flag_day: boolean }>();
-          (scheds || []).forEach((s: any) => { schedMap.set(s.date, { attendance_end: s.attendance_end ?? null, is_flag_day: !!s.is_flag_day }); });
+            // Fetch schedules in range
+            const { data: scheds, error: sErr } = await supabase
+              .from('attendance_schedules')
+              .select('date, is_flag_day, attendance_end')
+              .gte('date', startStr)
+              .lte('date', endStr);
+            if (sErr) throw sErr;
+            const flagged = (scheds || []).filter((s: any) => !!s.is_flag_day).map((s: any) => s.date as string);
+            console.log('[Home] Flagged dates in range:', flagged);
+            const flagSet = new Set<string>();
+            const schedMap = new Map<string, { attendance_end: string | null; is_flag_day: boolean }>();
+            (scheds || []).forEach((s: any) => { schedMap.set(s.date, { attendance_end: s.attendance_end ?? null, is_flag_day: !!s.is_flag_day }); });
 
-          // Limit flagged dates to those where this student is required (union of sections + explicit)
-          if (flagged.length > 0) {
-            const { data: reqSecs } = await supabase
-              .from('attendance_schedule_required_sections')
-              .select('date, program_code, year_name, section_name')
-              .in('date', flagged);
-            const { data: reqStud } = await supabase
-              .from('attendance_schedule_required_students')
-              .select('date')
-              .eq('student_id', profile.id)
-              .in('date', flagged);
-            const norm = (v: any) => String(v ?? '').trim().toLowerCase();
-            const reqStudDates = new Set<string>((reqStud || []).map((r: any) => r.date as string));
-            const reqSecDates = new Set<string>();
-            (reqSecs || []).forEach((r: any) => {
-              if (norm(r.program_code) === norm((profile as any).program) && norm(r.year_name) === norm((profile as any).year) && norm(r.section_name) === norm((profile as any).section)) {
-                reqSecDates.add(r.date as string);
+            // Limit flagged dates to those where this student is required - simple ID check
+            if (flagged.length > 0) {
+              const { data: reqStud, error: studError } = await supabase
+                .from('attendance_schedule_required_students')
+                .select('date')
+                .eq('student_id', profile.id)
+                .in('date', flagged);
+              
+              if (studError) {
+                console.error('[Home] Error fetching required students:', studError);
               }
-            });
-            flagged.forEach(d => { if (reqStudDates.has(d) || reqSecDates.has(d)) flagSet.add(d); });
-            console.log('[Home] Required dates for student:', { reqSecDates: Array.from(reqSecDates), reqStudDates: Array.from(reqStudDates), flagSet: Array.from(flagSet) });
-          }
+              
+              console.log('[Home] Required dates for student:', {
+                studentId: profile.id,
+                requiredDates: reqStud || []
+              });
+              
+              // Add dates where this student is required
+              (reqStud || []).forEach((r: any) => flagSet.add(r.date as string));
+            }
 
           // Fetch all attendance records in range for this user
           const startISO = new Date(start); startISO.setHours(0,0,0,0);
@@ -337,8 +317,29 @@ export default function HomeScreen() {
               }
               pDays.push({ date: ds, id: ref.id, verified: !!ref.verified, created_at: ref.created_at, status });
             } else {
-              // Only count as absent if date is strictly before today
-              if (ds < todayStrISO) aDays.push(ds);
+              // No attendance record for this required date
+              if (ds < todayStrISO) {
+                // Past date - mark as absent
+                aDays.push(ds);
+              } else if (ds === todayStrISO) {
+                // Today - check if waiting or absent
+                if (sched?.attendance_end) {
+                  const [eh, em] = String(sched.attendance_end).split(':').map((x: string) => parseInt(x, 10));
+                  const endMinutes = (eh || 0) * 60 + (em || 0);
+                  const nowMin = now.getHours()*60 + now.getMinutes();
+                  if (nowMin <= endMinutes) {
+                    // Still within attendance window - show as "Pending" (Waiting)
+                    pDays.push({ date: ds, verified: false, status: 'Pending' });
+                  } else {
+                    // Window closed - mark as absent
+                    aDays.push(ds);
+                  }
+                } else {
+                  // No schedule details, mark as absent
+                  aDays.push(ds);
+                }
+              }
+              // Future dates (ds > todayStrISO) - don't include yet
             }
           }
 
@@ -348,9 +349,10 @@ export default function HomeScreen() {
           setAbsentDays(aDays.sort((a,b) => a < b ? 1 : -1));
           setPresentCount(verifiedCount);
           setAbsentCount(aDays.length);
-        } catch (e) {
-          console.warn('[Home] failed to compute present/absent stats', e);
-          setPresentDays([]); setAbsentDays([]); setPresentCount(0); setAbsentCount(0);
+          } catch (e) {
+            console.warn('[Home] failed to compute present/absent stats', e);
+            setPresentDays([]); setAbsentDays([]); setPresentCount(0); setAbsentCount(0);
+          }
         }
       }
     } catch (e) {
@@ -367,6 +369,15 @@ export default function HomeScreen() {
     })();
     return () => { active = false; };
   }, [loadAttendance]);
+
+  // Reload attendance when screen comes into focus
+  // This ensures data is fresh when navigating back from other screens
+  useFocusEffect(
+    useCallback(() => {
+      loadAttendance();
+      refetchUnreadCount();
+    }, [loadAttendance, refetchUnreadCount])
+  );
 
   // Load teacher advisories and students
   useEffect(() => {
@@ -525,23 +536,17 @@ export default function HomeScreen() {
             .eq('section', a.section_name);
           const ids = (studs || []).map(s => (s as any).id);
           if (ids.length === 0) { summaries[key] = { verified: 0, total: 0 }; continue; }
-          // Determine targeted set for today in this class
+          // Determine targeted set for today in this class - simple: check which students are required
           const yyyy = now.getFullYear();
           const mm = String(now.getMonth() + 1).padStart(2, '0');
           const dd = String(now.getDate()).padStart(2, '0');
           const todayISO = `${yyyy}-${mm}-${dd}`;
-          const { data: reqSec } = await supabase
-            .from('attendance_schedule_required_sections')
-            .select('program_code, year_name, section_name')
-            .eq('date', todayISO);
-          const sectionRequired = (reqSec || []).some((r: any) => r.program_code === a.program_code && r.year_name === a.year_name && r.section_name === a.section_name);
           const { data: reqStud } = await supabase
             .from('attendance_schedule_required_students')
             .select('student_id')
             .eq('date', todayISO);
           const classIdSet = new Set(ids);
           const targeted = new Set<string>();
-          if (sectionRequired) ids.forEach(id => targeted.add(id));
           (reqStud || []).forEach((r: any) => { if (classIdSet.has(r.student_id)) targeted.add(r.student_id); });
           const targetedIds = Array.from(targeted);
           if (targetedIds.length === 0) { summaries[key] = { verified: 0, total: 0 }; continue; }
@@ -646,6 +651,7 @@ export default function HomeScreen() {
         }
       }
       await loadAttendance();
+      await refetchUnreadCount();
     } finally {
       setRefreshing(false);
     }
@@ -792,6 +798,14 @@ export default function HomeScreen() {
                 {profile.first_name?.charAt(0)}{profile.last_name?.charAt(0)}
               </Text>
             </View>
+            {/* Notification Badge */}
+            {unreadCount > 0 && (
+              <View style={styles.notificationBadge}>
+                <Text style={styles.notificationBadgeText}>
+                  {unreadCount > 99 ? '99+' : unreadCount}
+                </Text>
+              </View>
+            )}
           </TouchableOpacity>
         </View>
         <Text style={styles.subtitle}>{getRoleDescription()}</Text>
@@ -830,37 +844,22 @@ export default function HomeScreen() {
                     .eq('date', todayISO)
                     .maybeSingle();
 
-                  // Required students (sections + explicit)
-                  const { data: reqSecs } = await supabase
-                    .from('attendance_schedule_required_sections')
-                    .select('program_code, year_name, section_name')
-                    .eq('date', todayISO);
+                  // Required students - simple: just get IDs from the table
                   const { data: reqStud } = await supabase
                     .from('attendance_schedule_required_students')
                     .select('student_id')
                     .eq('date', todayISO);
-                  const explicitIds = new Set<string>((reqStud || []).map((r: any) => r.student_id));
-                  let studsForSections: any[] = [];
-                  if ((reqSecs || []).length > 0) {
-                    const progCodes = Array.from(new Set((reqSecs || []).map((r: any) => r.program_code)));
-                    const { data: studs } = await supabase
-                      .from('user_profiles')
-                      .select('id, first_name, last_name, email, program, year, section')
-                      .eq('role', 'student')
-                      .in('program', progCodes);
-                    studsForSections = (studs || []).filter((s: any) => (reqSecs || []).some((r: any) => String(r.program_code) === String(s.program) && String(r.year_name) === String(s.year) && String(r.section_name) === String(s.section)));
-                  }
-                  let explicitStuds: any[] = [];
-                  if (explicitIds.size > 0) {
-                    const { data: eStuds } = await supabase
-                      .from('user_profiles')
-                      .select('id, first_name, last_name, email, program, year, section')
-                      .in('id', Array.from(explicitIds));
-                    explicitStuds = eStuds || [];
-                  }
+                  const targetStudentIds = Array.from(new Set((reqStud || []).map((r: any) => r.student_id)));
+                  
+                  // Fetch student profiles for these IDs
                   const studentMap: Record<string, any> = {};
-                  [...studsForSections, ...explicitStuds].forEach((s: any) => { studentMap[s.id] = s; });
-                  const targetStudentIds = Object.keys(studentMap);
+                  if (targetStudentIds.length > 0) {
+                    const { data: studentProfiles } = await supabase
+                      .from('user_profiles')
+                      .select('id, first_name, last_name, email, program, year, section')
+                      .in('id', targetStudentIds);
+                    (studentProfiles || []).forEach((s: any) => { studentMap[s.id] = s; });
+                  }
 
                   // Required teachers
                   const { data: reqTeach } = await supabase
@@ -1316,11 +1315,10 @@ export default function HomeScreen() {
                           '#e03131'
                       }} 
                       onPress={() => {
+                        setStudentAttendanceModal(false);
                         if (item.type === 'present' && (item as any).id) {
-                          setStudentAttendanceModal(false);
                           router.push({ pathname: '/(tabs)/verify-attendance/[id]', params: { id: (item as any).id } } as any);
                         } else {
-                          setStudentAttendanceModal(false);
                           router.push({ pathname: '/(tabs)/schedule-view', params: { anchor: item.date } } as any);
                         }
                       }}
@@ -1627,7 +1625,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
-    overflow: 'hidden',
+    position: 'relative',
   },
   avatar: {
     width: 56,
@@ -1641,6 +1639,31 @@ const styles = StyleSheet.create({
     color: '#4e73df',
     fontSize: 20,
     fontWeight: 'bold',
+  },
+  notificationBadge: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    backgroundColor: '#e03131',
+    borderRadius: 11,
+    minWidth: 22,
+    height: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 5,
+    borderWidth: 2,
+    borderColor: '#4e73df',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 5,
+  },
+  notificationBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   subtitle: {
     fontSize: 14,

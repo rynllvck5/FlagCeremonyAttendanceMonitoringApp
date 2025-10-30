@@ -106,19 +106,13 @@ export default function AdvisoryRosterScreen() {
         }
       } catch {}
 
-      // Determine targeted IDs for today (union of this section requirement and explicit required students)
+      // Determine targeted IDs for today - simple: check which students are required
       const yyyy = now.getFullYear();
       const mm = String(now.getMonth() + 1).padStart(2, '0');
       const dd = String(now.getDate()).padStart(2, '0');
       const todayISO = `${yyyy}-${mm}-${dd}`;
       const targeted = new Set<string>();
       try {
-        const { data: reqSec } = await supabase
-          .from('attendance_schedule_required_sections')
-          .select('program_code, year_name, section_name')
-          .eq('date', todayISO);
-        const sectionRequired = (reqSec || []).some((r: any) => r.program_code === program_code && r.year_name === year_name && r.section_name === section_name);
-        if (sectionRequired) ids.forEach(id => targeted.add(id));
         const { data: reqStud } = await supabase
           .from('attendance_schedule_required_students')
           .select('student_id')
@@ -240,17 +234,22 @@ export default function AdvisoryRosterScreen() {
                 <Text style={styles.meta}>{s.email}</Text>
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 12 }}>
-                {statusMap[s.id] === 'Present' && (
-                  <Text style={{ color: '#28a745', fontWeight: '700' }}>Present</Text>
-                )}
-                {statusMap[s.id] === 'Late' && (
-                  <Text style={{ color: '#fd7e14', fontWeight: '700' }}>Late</Text>
-                )}
-                {statusMap[s.id] === 'Waiting' && (
-                  <Text style={{ color: '#f59f00', fontWeight: '700' }}>Waiting</Text>
-                )}
-                {statusMap[s.id] === 'Absent' && (
-                  <Text style={{ color: '#e03131', fontWeight: '700' }}>Absent</Text>
+                {/* Only show status if student is required today */}
+                {statusMap[s.id] && (
+                  <>
+                    {statusMap[s.id] === 'Present' && (
+                      <Text style={{ color: '#28a745', fontWeight: '700' }}>Present</Text>
+                    )}
+                    {statusMap[s.id] === 'Late' && (
+                      <Text style={{ color: '#fd7e14', fontWeight: '700' }}>Late</Text>
+                    )}
+                    {statusMap[s.id] === 'Waiting' && (
+                      <Text style={{ color: '#f59f00', fontWeight: '700' }}>Waiting</Text>
+                    )}
+                    {statusMap[s.id] === 'Absent' && (
+                      <Text style={{ color: '#e03131', fontWeight: '700' }}>Absent</Text>
+                    )}
+                  </>
                 )}
 
                 {/* Captain badge */}
